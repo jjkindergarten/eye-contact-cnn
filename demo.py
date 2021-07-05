@@ -14,6 +14,8 @@ from PIL import ImageDraw
 from PIL import ImageFont
 from colour import Color
 from time import time
+from pathlib import Path
+import json
 
 
 parser = argparse.ArgumentParser()
@@ -106,13 +108,16 @@ def run(video_path, face_path, model_weight, jitter, vis, display_off, save_text
     # load model weights
     model = model_static(model_weight)
     model_dict = model.state_dict()
-    # snapshot = torch.load(model_weight, map_location='cpu')
-    snapshot = torch.load(model_weight)
+    snapshot = torch.load(model_weight, map_location='cpu')
+    # snapshot = torch.load(model_weight)
     model_dict.update(snapshot)
     model.load_state_dict(model_dict)
 
-    model.cuda()
+    # model.cuda()
     model.train(False)
+
+    # score_list
+    score_list = []
 
     # video reading loop
     count = 0
@@ -146,8 +151,10 @@ def run(video_path, face_path, model_weight, jitter, vis, display_off, save_text
                     if frame_cnt in df.index:
                         bbox.append([df.loc[frame_cnt,'left'],df.loc[frame_cnt,'top'],df.loc[frame_cnt,'right'],df.loc[frame_cnt,'bottom']])
 
+                if len(bbox) == 0:
+                    score_list.append(0)
                 frame = Image.fromarray(frame)
-                for b in bbox:
+                for b in bbox[:1]:
                     face = frame.crop((b))
                     img = test_transforms(face)
                     img.unsqueeze_(0)
@@ -163,11 +170,11 @@ def run(video_path, face_path, model_weight, jitter, vis, display_off, save_text
                     # forward pass
                     # output = model(img.cuda())
                     output = model(img)
-                    print('output of model {}'.format(output))
                     if jitter > 0:
                         output = torch.mean(output, 0)
                     score = F.sigmoid(output).item()
-                    print('output of score is {}'.format(score))
+                    score_list.append(score)
+
                     coloridx = min(int(round(score*10)),9)
                     draw = ImageDraw.Draw(frame)
                     drawrect(draw, [(b[0], b[1]), (b[2], b[3])], outline=colors[coloridx].hex, width=5)
@@ -181,7 +188,7 @@ def run(video_path, face_path, model_weight, jitter, vis, display_off, save_text
                     # cv2.imshow('',frame)
                     if vis:
                         outvid.write(frame)
-                        cv2.imwrite('test_' + '{0:04d}'.format(count) + '.jpg', frame)
+                        # cv2.imwrite('test_' + '{0:04d}'.format(count) + '.jpg', frame)
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord('q'):
                         break
@@ -190,14 +197,44 @@ def run(video_path, face_path, model_weight, jitter, vis, display_off, save_text
         else:
             ret = cap.grab()
 
+    # videoname = os.path.basename(video_path)
+    # pre, ext = os.path.splitext(videoname)
+    # jsonname = pre + '.json'
+    # print(score_list)
+    # with open(jsonname, 'w') as f:
+    #     json.dump(score_list, f)
+
+
     if vis:
         outvid.release()
     if save_text:
         f.close()
     cap.release()
-    print('DONE!')
+    return score_list
 
 
 if __name__ == "__main__":
-    run(args.video, args.face, args.model_weight, args.jitter, args.save_vis, args.display_off, args.save_text)
 
+    target_dir = './'
+
+    if os.path.isdir(args.video):
+        path_list = args.video.rglob('*.mp4')
+        for f_path in path_list:
+            f_ele = str(f_path).split('/')
+            fn = f_ele[-1]
+            f_score = f_ele[-2]
+            score_list = run(str(f_path), args.face, args.model_weight, args.jitter, args.save_vis, args.display_off, args.save_text)
+            target_path = os.path.join(target_dir, f_score, fn.replace('mp4', 'json'))
+            Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(target_path, 'w') as f:
+                json.dump(score_list, f)
+    elif os.path.isfile(args.video):
+        score_list = run(args.video, args.face, args.model_weight, args.jitter, args.save_vis, args.display_off,
+                         args.save_text)
+        f_ele = args.video.split('/')
+        fn = f_ele[-1]
+        f_score = f_ele[-2]
+        target_path = os.path.join(target_dir, f_score, fn.replace('mp4', 'json'))
+        Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(target_path, 'w') as f:
+            json.dump(score_list, f)
