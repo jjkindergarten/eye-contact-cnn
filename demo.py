@@ -13,6 +13,7 @@ from PIL import Image
 from PIL import ImageDraw
 from PIL import ImageFont
 from colour import Color
+from time import time
 
 
 parser = argparse.ArgumentParser()
@@ -59,6 +60,11 @@ def run(video_path, face_path, model_weight, jitter, vis, display_off, save_text
         video_path = 'live.avi'
     else:
         cap = cv2.VideoCapture(video_path)
+        ori_fps = cap.get(cv2.CAP_PROP_FPS)
+
+    tar_fps = 2
+    fps_ratio = int(ori_fps//tar_fps)
+    print('fps ratio {}'.format(fps_ratio))
 
     # set up output file
     if save_text:
@@ -100,6 +106,7 @@ def run(video_path, face_path, model_weight, jitter, vis, display_off, save_text
     # load model weights
     model = model_static(model_weight)
     model_dict = model.state_dict()
+    # snapshot = torch.load(model_weight, map_location='cpu')
     snapshot = torch.load(model_weight)
     model_dict.update(snapshot)
     model.load_state_dict(model_dict)
@@ -108,77 +115,89 @@ def run(video_path, face_path, model_weight, jitter, vis, display_off, save_text
     model.train(False)
 
     # video reading loop
+    count = 0
+    timing = time()
     while(cap.isOpened()):
-        ret, frame = cap.read()
-        if ret == True:
-            height, width, channels = frame.shape
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            frame_cnt += 1
-            bbox = []
-            if facemode == 'DLIB':
-                dets = cnn_face_detector(frame, 1)
-                for d in dets:
-                    l = d.rect.left()
-                    r = d.rect.right()
-                    t = d.rect.top()
-                    b = d.rect.bottom()
-                    # expand a bit
-                    l -= (r-l)*0.2
-                    r += (r-l)*0.2
-                    t -= (b-t)*0.2
-                    b += (b-t)*0.2
-                    bbox.append([l,t,r,b])
-            elif facemode == 'GIVEN':
-                if frame_cnt in df.index:
-                    bbox.append([df.loc[frame_cnt,'left'],df.loc[frame_cnt,'top'],df.loc[frame_cnt,'right'],df.loc[frame_cnt,'bottom']])
-
-            frame = Image.fromarray(frame)
-            for b in bbox:
-                face = frame.crop((b))
-                img = test_transforms(face)
-                img.unsqueeze_(0)
-                if jitter > 0:
-                    for i in range(jitter):
-                        bj_left, bj_top, bj_right, bj_bottom = bbox_jitter(b[0], b[1], b[2], b[3])
-                        bj = [bj_left, bj_top, bj_right, bj_bottom]
-                        facej = frame.crop((bj))
-                        img_jittered = test_transforms(facej)
-                        img_jittered.unsqueeze_(0)
-                        img = torch.cat([img, img_jittered])
-
-                # forward pass
-                output = model(img.cuda())
-                if jitter > 0:
-                    output = torch.mean(output, 0)
-                score = F.sigmoid(output).item()
-
-                coloridx = min(int(round(score*10)),9)
-                draw = ImageDraw.Draw(frame)
-                drawrect(draw, [(b[0], b[1]), (b[2], b[3])], outline=colors[coloridx].hex, width=5)
-                draw.text((b[0],b[3]), str(round(score,2)), fill=(255,255,255,128), font=font)
-                if save_text:
-                    f.write("%d,%f\n"%(frame_cnt,score))
-
-            if not display_off:
-                frame = np.asarray(frame) # convert PIL image back to opencv format for faster display
+        count += 1
+        if count % fps_ratio == 0:
+            print('frame {} is done, duration {}'.format(count, time()-timing))
+            timing = time()
+            ret, frame = cap.read()
+            if ret == True:
+                height, width, channels = frame.shape
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                cv2.imshow('',frame)
-                if vis:
-                    outvid.write(frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    break
+
+                frame_cnt += 1
+                bbox = []
+                if facemode == 'DLIB':
+                    dets = cnn_face_detector(frame, 1)
+                    for d in dets:
+                        l = d.rect.left()
+                        r = d.rect.right()
+                        t = d.rect.top()
+                        b = d.rect.bottom()
+                        # expand a bit
+                        l -= (r-l)*0.2
+                        r += (r-l)*0.2
+                        t -= (b-t)*0.2
+                        b += (b-t)*0.2
+                        bbox.append([l,t,r,b])
+                elif facemode == 'GIVEN':
+                    if frame_cnt in df.index:
+                        bbox.append([df.loc[frame_cnt,'left'],df.loc[frame_cnt,'top'],df.loc[frame_cnt,'right'],df.loc[frame_cnt,'bottom']])
+
+                frame = Image.fromarray(frame)
+                for b in bbox:
+                    face = frame.crop((b))
+                    img = test_transforms(face)
+                    img.unsqueeze_(0)
+                    if jitter > 0:
+                        for i in range(jitter):
+                            bj_left, bj_top, bj_right, bj_bottom = bbox_jitter(b[0], b[1], b[2], b[3])
+                            bj = [bj_left, bj_top, bj_right, bj_bottom]
+                            facej = frame.crop((bj))
+                            img_jittered = test_transforms(facej)
+                            img_jittered.unsqueeze_(0)
+                            img = torch.cat([img, img_jittered])
+
+                    # forward pass
+                    # output = model(img.cuda())
+                    output = model(img)
+                    print('output of model {}'.format(output))
+                    if jitter > 0:
+                        output = torch.mean(output, 0)
+                    score = F.sigmoid(output).item()
+                    print('output of score is {}'.format(score))
+                    coloridx = min(int(round(score*10)),9)
+                    draw = ImageDraw.Draw(frame)
+                    drawrect(draw, [(b[0], b[1]), (b[2], b[3])], outline=colors[coloridx].hex, width=5)
+                    draw.text((b[0],b[3]), str(round(score,2)), fill=(255,255,255,128), font=font)
+                    if save_text:
+                        f.write("%d,%f\n"%(frame_cnt,score))
+
+                if not display_off:
+                    frame = np.asarray(frame) # convert PIL image back to opencv format for faster display
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # cv2.imshow('',frame)
+                    if vis:
+                        outvid.write(frame)
+                        cv2.imwrite('test_' + '{0:04d}'.format(count) + '.jpg', frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        break
+            else:
+                break
         else:
-            break
+            ret = cap.grab()
 
     if vis:
         outvid.release()
     if save_text:
         f.close()
     cap.release()
-    print 'DONE!'
+    print('DONE!')
 
 
 if __name__ == "__main__":
     run(args.video, args.face, args.model_weight, args.jitter, args.save_vis, args.display_off, args.save_text)
+
